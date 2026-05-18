@@ -5,30 +5,38 @@ using UnityEngine.UI;
 
 /// <summary>
 /// Controls a single reel: spinning animation, symbol strip, and stopping on a result.
-/// On startup, visible slots are shown immediately with random symbols.
+/// 
+/// IMPORTANT SETUP:
+/// - Attach this script to Reel_Left / Reel_Center / Reel_Right
+/// - Each reel must have 3 child Image objects named EXACTLY:
+///     "Slot_Top", "Slot_Middle", "Slot_Bottom"
+/// - Each reel must have a child RectTransform named "SymbolStrip"
+/// - Slot images are found automatically by name — no manual Inspector dragging needed
 /// </summary>
 public class Reel : MonoBehaviour
 {
     // ──────────────────────────────────────────────
-    //  Inspector References
+    //  Inspector Fields
     // ──────────────────────────────────────────────
 
     [Header("Symbol Configuration")]
+    [Tooltip("Drag all 4 SymbolData assets here")]
     public List<SymbolData> symbolPool = new List<SymbolData>();
 
-    [Header("Reel Strip Setup")]
-    public RectTransform symbolStrip;
-    public Image[] visibleSymbolImages = new Image[3]; // 0=Top 1=Middle(result) 2=Bottom
-    public float symbolHeight = 150f;
-
     [Header("Spin Settings")]
-    public float spinSpeed = 1200f;
-    public float spinDuration = 1.5f;
+    public float symbolHeight   = 150f;
+    public float spinSpeed      = 1200f;
+    public float spinDuration   = 1.5f;
     public float decelerateDuration = 0.4f;
 
     // ──────────────────────────────────────────────
-    //  Private State
+    //  Private — found automatically at runtime
     // ──────────────────────────────────────────────
+
+    private RectTransform _symbolStrip;   // The scrolling strip container
+    private Image _slotTop;               // Top display image
+    private Image _slotMiddle;            // Middle display image  ← the result
+    private Image _slotBottom;            // Bottom display image
 
     private bool _isSpinning = false;
     private SymbolData _resultSymbol;
@@ -46,16 +54,54 @@ public class Reel : MonoBehaviour
 
     private void Awake()
     {
+        // Step 1: Find all children automatically by name
+        FindChildrenByName();
+
+        // Step 2: Build weighted symbol pool
         BuildWeightedPool();
+
+        // Step 3: Build the scrolling strip (hidden at start)
         BuildStripImages();
 
-        // Hide scrolling strip at start — only visible during spin
-        if (symbolStrip != null)
-            symbolStrip.gameObject.SetActive(false);
+        // Step 4: Show the 3 static slots with random symbols
+        ShowInitialSymbols();
+    }
 
-        // Immediately show the 3 static slots with random symbols
-        SetVisibleSlots(true);
-        ShowRandomInitialSymbols();
+    // ──────────────────────────────────────────────
+    //  Auto-find Children (the key fix)
+    // ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Finds SymbolStrip, Slot_Top, Slot_Middle, Slot_Bottom by searching
+    /// all children of this reel. No Inspector dragging required.
+    /// </summary>
+    private void FindChildrenByName()
+    {
+        // Search all children (including inactive ones)
+        foreach (Transform child in GetComponentsInChildren<Transform>(true))
+        {
+            switch (child.name)
+            {
+                case "SymbolStrip":
+                    _symbolStrip = child.GetComponent<RectTransform>();
+                    break;
+                case "Slot_Top":
+                    _slotTop = child.GetComponent<Image>();
+                    break;
+                case "Slot_Middle":
+                    _slotMiddle = child.GetComponent<Image>();
+                    break;
+                case "Slot_Bottom":
+                    _slotBottom = child.GetComponent<Image>();
+                    break;
+            }
+        }
+
+        // Log clear errors if anything is missing
+        if (_symbolStrip == null) Debug.LogError($"[Reel] {name}: Could not find child named 'SymbolStrip'");
+        if (_slotTop    == null) Debug.LogError($"[Reel] {name}: Could not find child named 'Slot_Top'");
+        if (_slotMiddle == null) Debug.LogError($"[Reel] {name}: Could not find child named 'Slot_Middle'");
+        if (_slotBottom == null) Debug.LogError($"[Reel] {name}: Could not find child named 'Slot_Bottom'");
     }
 
     // ──────────────────────────────────────────────
@@ -65,12 +111,24 @@ public class Reel : MonoBehaviour
     public SymbolData ResultSymbol => _resultSymbol;
     public bool IsSpinning => _isSpinning;
 
+    /// <summary>Begin spinning the reel after an optional delay.</summary>
     public void StartSpin(float delay = 0f, SymbolData forcedResult = null)
     {
         if (_spinCoroutine != null) StopCoroutine(_spinCoroutine);
         _spinCoroutine = StartCoroutine(SpinRoutine(delay, forcedResult));
     }
 
+    /// <summary>Called by SlotMachine just before spinning starts.</summary>
+    public void PrepareForSpin()
+    {
+        if (_symbolStrip != null)
+            _symbolStrip.gameObject.SetActive(true);
+
+        RandomiseStrip();
+        SetStaticSlotsVisible(false);
+    }
+
+    /// <summary>Force-stop the reel immediately.</summary>
     public void ForceStop()
     {
         if (_spinCoroutine != null) StopCoroutine(_spinCoroutine);
@@ -78,45 +136,36 @@ public class Reel : MonoBehaviour
         SnapToResult(_resultSymbol ?? GetRandomSymbol());
     }
 
-    /// <summary>Called by SlotMachine before each spin — shows strip, hides static slots.</summary>
-    public void PrepareForSpin()
-    {
-        if (symbolStrip != null)
-            symbolStrip.gameObject.SetActive(true);
-
-        RandomiseStrip();
-        SetVisibleSlots(false);
-    }
-
     // ──────────────────────────────────────────────
-    //  Startup Display
+    //  Initial Display
     // ──────────────────────────────────────────────
 
-    /// <summary>Fill all 3 visible slots with random symbols at game start.</summary>
-    private void ShowRandomInitialSymbols()
+    private void ShowInitialSymbols()
     {
-        if (visibleSymbolImages == null) return;
+        // Hide strip — not needed at start
+        if (_symbolStrip != null)
+            _symbolStrip.gameObject.SetActive(false);
 
-        for (int i = 0; i < visibleSymbolImages.Length; i++)
-        {
-            Image img = visibleSymbolImages[i];
-            if (img == null)
-            {
-                Debug.LogWarning($"[Reel] {gameObject.name}: visibleSymbolImages[{i}] is NULL — check Inspector assignment!");
-                continue;
-            }
-
-            img.gameObject.SetActive(true);
-            img.color = Color.white;
-            img.sprite = GetRandomSymbol().sprite;
-        }
+        // Show and fill each visible slot
+        SetSlot(_slotTop,    GetRandomSymbol(), true);
+        SetSlot(_slotMiddle, GetRandomSymbol(), true);
+        SetSlot(_slotBottom, GetRandomSymbol(), true);
 
         // Pre-assign result so it is never null before first spin
         _resultSymbol = GetRandomSymbol();
     }
 
+    /// <summary>Helper: sets a single slot's sprite, colour, and active state.</summary>
+    private void SetSlot(Image slot, SymbolData symbol, bool active)
+    {
+        if (slot == null || symbol == null) return;
+        slot.gameObject.SetActive(active);
+        slot.color = Color.white;
+        slot.sprite = symbol.sprite;
+    }
+
     // ──────────────────────────────────────────────
-    //  Private Helpers
+    //  Weighted RNG
     // ──────────────────────────────────────────────
 
     private void BuildWeightedPool()
@@ -128,28 +177,43 @@ public class Reel : MonoBehaviour
             for (int i = 0; i < sym.weight; i++)
                 _weightedPool.Add(sym);
         }
+
+        if (_weightedPool.Count == 0)
+            Debug.LogError($"[Reel] {name}: Symbol pool is empty! Assign SymbolData assets in Inspector.");
     }
+
+    private SymbolData GetRandomSymbol()
+    {
+        if (_weightedPool != null && _weightedPool.Count > 0)
+            return _weightedPool[Random.Range(0, _weightedPool.Count)];
+        return symbolPool != null && symbolPool.Count > 0 ? symbolPool[0] : null;
+    }
+
+    // ──────────────────────────────────────────────
+    //  Scrolling Strip
+    // ──────────────────────────────────────────────
 
     private void BuildStripImages()
     {
-        if (symbolStrip == null) return;
+        if (_symbolStrip == null) return;
 
         _stripImages = new Image[STRIP_ROWS];
         _stripTotalHeight = STRIP_ROWS * symbolHeight;
 
-        foreach (Transform child in symbolStrip)
-            Destroy(child.gameObject);
+        // Clear any existing strip children
+        for (int i = _symbolStrip.childCount - 1; i >= 0; i--)
+            Destroy(_symbolStrip.GetChild(i).gameObject);
 
         for (int i = 0; i < STRIP_ROWS; i++)
         {
             GameObject cell = new GameObject($"StripCell_{i}", typeof(RectTransform), typeof(Image));
-            cell.transform.SetParent(symbolStrip, false);
+            cell.transform.SetParent(_symbolStrip, false);
 
             RectTransform rt = cell.GetComponent<RectTransform>();
-            rt.sizeDelta = new Vector2(symbolStrip.sizeDelta.x, symbolHeight);
+            rt.sizeDelta        = new Vector2(_symbolStrip.sizeDelta.x, symbolHeight);
             rt.anchoredPosition = new Vector2(0f, -i * symbolHeight);
-            rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 1f);
-            rt.pivot = new Vector2(0.5f, 1f);
+            rt.anchorMin        = rt.anchorMax = new Vector2(0.5f, 1f);
+            rt.pivot            = new Vector2(0.5f, 1f);
 
             Image img = cell.GetComponent<Image>();
             img.preserveAspect = true;
@@ -164,51 +228,6 @@ public class Reel : MonoBehaviour
             if (img != null) img.sprite = GetRandomSymbol().sprite;
     }
 
-    private SymbolData GetRandomSymbol()
-    {
-        if (_weightedPool != null && _weightedPool.Count > 0)
-            return _weightedPool[Random.Range(0, _weightedPool.Count)];
-        if (symbolPool != null && symbolPool.Count > 0)
-            return symbolPool[0];
-        return null;
-    }
-
-    // ──────────────────────────────────────────────
-    //  Spin Coroutine
-    // ──────────────────────────────────────────────
-
-    private IEnumerator SpinRoutine(float delay, SymbolData forcedResult)
-    {
-        if (delay > 0f) yield return new WaitForSeconds(delay);
-
-        _isSpinning = true;
-        _resultSymbol = forcedResult ?? GetRandomSymbol();
-
-        // Phase 1: Full speed
-        float elapsed = 0f;
-        while (elapsed < spinDuration)
-        {
-            ScrollStrip(spinSpeed * Time.deltaTime);
-            elapsed += Time.deltaTime;
-            yield return null;
-        }
-
-        // Phase 2: Ease-out
-        elapsed = 0f;
-        while (elapsed < decelerateDuration)
-        {
-            float t = elapsed / decelerateDuration;
-            float easedSpeed = Mathf.Lerp(spinSpeed, 0f, t * t);
-            ScrollStrip(easedSpeed * Time.deltaTime);
-            elapsed += Time.deltaTime;
-            yield return null;
-        }
-
-        // Phase 3: Snap
-        SnapToResult(_resultSymbol);
-        _isSpinning = false;
-    }
-
     private void ScrollStrip(float amount)
     {
         if (_stripImages == null) return;
@@ -220,49 +239,76 @@ public class Reel : MonoBehaviour
         for (int i = 0; i < STRIP_ROWS; i++)
         {
             if (_stripImages[i] == null) continue;
-            float rawY = -i * symbolHeight + _currentOffset;
+            float rawY     = -i * symbolHeight + _currentOffset;
             float wrappedY = ((rawY % _stripTotalHeight) + _stripTotalHeight) % _stripTotalHeight;
             _stripImages[i].rectTransform.anchoredPosition = new Vector2(0f, wrappedY - _stripTotalHeight);
         }
     }
 
+    // ──────────────────────────────────────────────
+    //  Spin Coroutine
+    // ──────────────────────────────────────────────
+
+    private IEnumerator SpinRoutine(float delay, SymbolData forcedResult)
+    {
+        if (delay > 0f) yield return new WaitForSeconds(delay);
+
+        _isSpinning  = true;
+        _resultSymbol = forcedResult ?? GetRandomSymbol();
+
+        // Phase 1 — Full speed
+        float elapsed = 0f;
+        while (elapsed < spinDuration)
+        {
+            ScrollStrip(spinSpeed * Time.deltaTime);
+            elapsed += Time.deltaTime;
+            yield return null;
+        }
+
+        // Phase 2 — Ease-out deceleration
+        elapsed = 0f;
+        while (elapsed < decelerateDuration)
+        {
+            float t          = elapsed / decelerateDuration;
+            float easedSpeed = Mathf.Lerp(spinSpeed, 0f, t * t);
+            ScrollStrip(easedSpeed * Time.deltaTime);
+            elapsed += Time.deltaTime;
+            yield return null;
+        }
+
+        // Phase 3 — Snap to result
+        SnapToResult(_resultSymbol);
+        _isSpinning = false;
+    }
+
+    // ──────────────────────────────────────────────
+    //  Snap To Result
+    // ──────────────────────────────────────────────
+
     private void SnapToResult(SymbolData result)
     {
         if (result == null) return;
 
-        // Hide scrolling strip
-        if (symbolStrip != null)
-            symbolStrip.gameObject.SetActive(false);
+        // Hide the scrolling strip
+        if (_symbolStrip != null)
+            _symbolStrip.gameObject.SetActive(false);
 
-        SymbolData above = GetRandomSymbol();
-        SymbolData below = GetRandomSymbol();
-
-        if (visibleSymbolImages != null)
-        {
-            for (int i = 0; i < visibleSymbolImages.Length; i++)
-            {
-                Image img = visibleSymbolImages[i];
-                if (img == null) continue;
-
-                img.gameObject.SetActive(true);
-                img.color = Color.white;
-
-                switch (i)
-                {
-                    case 0: img.sprite = above.sprite;  break; // top
-                    case 1: img.sprite = result.sprite; break; // MIDDLE = result
-                    case 2: img.sprite = below.sprite;  break; // bottom
-                }
-            }
-        }
+        // Show static slots: top & bottom get random neighbours, middle gets the RESULT
+        SetSlot(_slotTop,    GetRandomSymbol(), true);
+        SetSlot(_slotMiddle, result,            true);  // ← actual spin result
+        SetSlot(_slotBottom, GetRandomSymbol(), true);
 
         _currentOffset = 0f;
     }
 
-    private void SetVisibleSlots(bool active)
+    // ──────────────────────────────────────────────
+    //  Helpers
+    // ──────────────────────────────────────────────
+
+    private void SetStaticSlotsVisible(bool active)
     {
-        if (visibleSymbolImages == null) return;
-        foreach (var img in visibleSymbolImages)
-            if (img != null) img.gameObject.SetActive(active);
+        if (_slotTop    != null) _slotTop.gameObject.SetActive(active);
+        if (_slotMiddle != null) _slotMiddle.gameObject.SetActive(active);
+        if (_slotBottom != null) _slotBottom.gameObject.SetActive(active);
     }
 }
